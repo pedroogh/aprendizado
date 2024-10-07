@@ -1,0 +1,529 @@
+
+#include <Wire.h>            // Biblioteca para comunicação I2C
+#include <PCAL9535A.h>      // Biblioteca para controlar o PCAL9535A (expansor de I/O)
+#include <Crescer.h>        // Biblioteca da placa Crescer
+
+// Criação de objetos para controle de tempo
+Tempora tControle_CG;      // Controle de tempo para o circuito CG
+Tempora tControle_MCA;     // Controle de tempo para o circuito MCA
+Tempora tControle_CR;      // Controle de tempo para o circuito CR
+
+// Definição de constantes para pinos
+const int SENSOR_RUA = 5;                // Pino do sensor na rua
+const int SENSOR_GALPAO = 19;            // Pino do sensor no galpão
+const int ACIONAMENTO_MCA = 2;           // Pino para acionamento da MCA
+const int DESACIONAMENTO_MCA = 15;       // Pino para desacionamento da MCA
+const int CANCELA_GALPAO_CIMA = 27;      // Pino para a cancela do galpão (posição cima)
+const int CANCELA_GALPAO_BAIXO = 14;     // Pino para a cancela do galpão (posição baixo)
+const int CANCELA_RUA_BAIXO = 23;        // Pino para a cancela da rua (posição baixo)
+const int CANCELA_RUA_CIMA = 18;         // Pino para a cancela da rua (posição cima)
+const int CANCELA_RUA = 32;               // Pino para a cancela da rua
+const int CANCELA_GALPAO = 33;           // Pino para a cancela do galpão
+const int TRAVAMENTO_MCA = 4;            // Pino para travamento da MCA
+
+// Variáveis para leituras e estados
+int leitura_SR;         // Leitura do sensor na rua
+int leitura_GP;         // Leitura do sensor no galpão
+int leitura_MCA1;       // Leitura do estado da MCA 1
+int leitura_MCA2;       // Leitura do estado da MCA 2
+int estado_GP;          // Estado do galpão
+int estado_R;           // Estado da rua
+int estado_MCA;         // Estado da MCA
+int contador = 0;       // Contador para controle de eventos
+
+// Variáveis para controle de tempo
+unsigned long tempoInicio = 0;         // Marca o tempo de início de um evento
+unsigned long tempoInicio2 = 0;        // Marca o tempo de início de outro evento
+const unsigned long tempoMinimo = 1000; // Tempo mínimo para ações (em milissegundos)
+
+void setup() {
+  Serial.begin(115200); // Inicializa a comunicação serial a 115200 bps
+
+  // Configuração dos pinos
+  pinMode(CANCELA_RUA, OUTPUT);         // Configura a cancela da rua como saída
+  pinMode(CANCELA_GALPAO, OUTPUT);      // Configura a cancela do galpão como saída
+  pinMode(TRAVAMENTO_MCA, OUTPUT);       // Configura o travamento da MCA como saída
+  pinMode(CANCELA_GALPAO_CIMA, INPUT);  // Configura a cancela do galpão (cima) como entrada
+  pinMode(CANCELA_GALPAO_BAIXO, INPUT); // Configura a cancela do galpão (baixo) como entrada
+  pinMode(CANCELA_RUA_CIMA, INPUT);     // Configura a cancela da rua (cima) como entrada
+  pinMode(CANCELA_RUA_BAIXO, INPUT);    // Configura a cancela da rua (baixo) como entrada
+  pinMode(SENSOR_RUA, INPUT);            // Configura o sensor da rua como entrada
+  pinMode(SENSOR_GALPAO, INPUT);         // Configura o sensor do galpão como entrada
+  pinMode(ACIONAMENTO_MCA, INPUT);       // Configura o acionamento da MCA como entrada
+  pinMode(DESACIONAMENTO_MCA, INPUT);    // Configura o desacionamento da MCA como entrada
+
+  // Configuração dos timers para os circuitos
+  tControle_CG.defiSP(10000);   // Define tempo de controle para CG (10 segundos)
+  tControle_CR.defiSP(13000);   // Define tempo de controle para CR (13 segundos)
+  tControle_MCA.defiSP(120000); // Define tempo de controle para MCA (120 segundos)
+
+  // Inicializa as saídas para as cancelas
+  digitalWrite(CANCELA_GALPAO, HIGH); // Mantém a cancela do galpão fechada
+  estado_GP = 0;        // Estado inicial do galpão (fechado)
+  estado_R = 0;         // Estado inicial da rua (fechado)
+  estado_MCA = 0;       // Estado inicial da MCA (desligado)
+}
+
+void loop() {
+  // Lê os estados dos sensores e acionamentos
+  leitura_SR = digitalRead(SENSOR_RUA);       // Leitura do sensor na rua
+  leitura_GP = digitalRead(SENSOR_GALPAO);    // Leitura do sensor no galpão
+  leitura_MCA1 = digitalRead(ACIONAMENTO_MCA); // Leitura do acionamento da MCA
+  leitura_MCA2 = digitalRead(DESACIONAMENTO_MCA); // Leitura do desacionamento da MCA
+
+  // Verifica se o sensor do galpão foi ativado
+  if (leitura_GP == HIGH) {
+    Serial.println("Passou no sensor do galpao."); // Log para depuração
+    controlaCancelasGP();  // Chama função para controlar as cancelas do galpão
+  }
+
+  // Verifica se o sensor da rua foi ativado
+  if (leitura_SR == HIGH) {
+    Serial.println("Passou no sensor da rua."); // Log para depuração
+    controlaCancelasRua(); // Chama função para controlar as cancelas da rua
+  }
+
+  controlaSinalMCA(); // Controla o sinal da MCA (acionamento/desacionamento)
+
+  atualizaCancelas();  // Atualiza o estado das cancelas
+  delay(200);          // Aguarda 200 milissegundos antes de repetir o loop
+}
+
+void controlaSinalMCA() {
+    // Verifica se o acionamento da MCA foi detectado
+    if (leitura_MCA1 == LOW) { // Se acionamento detectado (LOW)
+        if (tempoInicio == 0) { // Se ainda não foi iniciado o tempo
+            tempoInicio = millis(); // Marca o tempo de início
+        } else if (millis() - tempoInicio >= tempoMinimo) { // Se o tempo mínimo foi atingido
+            Serial.println("Sinal válido detectado no acionamento."); // Log para depuração
+            controlaTravamentoMCA(); // Controla o travamento da MCA
+            contador++; // Incrementa contador de acionamentos
+            tempoInicio = 0; // Reseta o tempo de início
+        }
+    } else {
+        tempoInicio = 0; // Reseta o tempo se o acionamento não for detectado
+    }
+
+    // Verifica se o desacionamento da MCA foi detectado
+    if (leitura_MCA2 == LOW) { // Se desacionamento detectado (LOW)
+        if (tempoInicio2 == 0) { // Se ainda não foi iniciado o tempo
+            tempoInicio2 = millis(); // Marca o tempo de início
+        } else if (millis() - tempoInicio2 >= tempoMinimo) { // Se o tempo mínimo foi atingido
+            Serial.println("Sinal válido detectado no desacionamento."); // Log para depuração
+            if (contador == 0) { // Se não houve acionamentos anteriores
+                controlaDestravamentoMCA(); // Controla o destravamento da MCA
+            } else { // Se houve acionamentos
+                contador--; // Decrementa contador de acionamentos
+                controlaDestravamentoMCA(); // Controla o destravamento da MCA
+            }
+            tempoInicio2 = 0; // Reseta o tempo de início
+        }
+    } else {
+        tempoInicio2 = 0; // Reseta o tempo se o desacionamento não for detectado
+    }
+}
+
+void controlaCancelasGP() {
+  // Função para controlar as cancelas do galpão
+  if (estado_R == 0 && estado_GP == 0 && estado_MCA == 0) { // Condição inicial
+    estado_GP = 1; // Atualiza estado do galpão
+    estado_R = 0;  // Atualiza estado da rua
+    estado_MCA = 0; // Atualiza estado da MCA
+    tControle_CG.Saida(0); // Aciona a saída do controle CG
+  } else if (estado_R == 0 && estado_GP == 0 && estado_MCA == 1) {
+    estado_GP = 2; // Atualiza estado do galpão
+    estado_R = 0; 
+    estado_MCA = 1;
+    tControle_CG.Saida(0);
+  } else if (estado_R == 0 && estado_GP == 1 && estado_MCA == 0) {
+    estado_GP = 1; 
+    estado_R = 0; 
+    estado_MCA = 0;
+    tControle_CG.Saida(0);
+  } else if (estado_R == 1 && estado_GP == 0 && estado_MCA == 0) {
+    estado_GP = 2; 
+    estado_R = 1; 
+    estado_MCA = 0;
+    tControle_CG.Saida(0);
+  } else if (estado_R == 1 && estado_GP == 0 && estado_MCA == 1) {
+    estado_GP = 2; 
+    estado_R = 1; 
+    estado_MCA = 1;
+    tControle_CG.Saida(0);
+  } else if (estado_R == 0 && estado_GP == 1 && estado_MCA == 2) {
+    estado_GP = 1; 
+    estado_R = 0; 
+    estado_MCA = 2;
+    tControle_CG.Saida(0);
+  } else if (estado_R == 0 && estado_GP == 2 && estado_MCA == 1) {
+    estado_GP = 2; 
+    estado_R = 0; 
+    estado_MCA = 1;
+    tControle_CG.Saida(0);
+  } else if (estado_R == 1 && estado_GP == 2 && estado_MCA == 0) {
+    estado_GP = 2; 
+    estado_R = 1; 
+    estado_MCA = 0;
+    tControle_CG.Saida(0);
+  } else if (estado_R == 2 && estado_GP == 1 && estado_MCA == 0) {
+    estado_GP = 1; 
+    estado_R = 2; 
+    estado_MCA = 0;
+    tControle_CG.Saida(0);
+  } else if (estado_R == 1 && estado_GP == 2 && estado_MCA == 1) {
+    estado_GP = 2; 
+    estado_R = 1; 
+    estado_MCA = 1;
+    tControle_CG.Saida(0);
+  } else if (estado_R == 2 && estado_GP == 1 && estado_MCA == 2) {
+    estado_GP = 1; 
+    estado_R = 2; 
+    estado_MCA = 2;
+    tControle_CG.Saida(0);
+  }
+}
+void controlaCancelasRua() {
+  // Função para controlar as cancelas da rua
+  if (estado_R == 0 && estado_GP == 0 && estado_MCA == 0) { // Condição inicial
+    estado_GP = 0; // Atualiza estado do galpão
+    estado_R = 1;  // Atualiza estado da rua
+    estado_MCA = 0; // Atualiza estado da MCA
+    tControle_CR.Saida(0); // Aciona a saída do controle CR
+  } else if (estado_R == 0 && estado_GP == 0 && estado_MCA == 1) {
+    estado_GP = 0; 
+    estado_R = 1; 
+    estado_MCA = 1;
+    tControle_CR.Saida(0); // Aciona a saída do controle CR
+  } else if (estado_R == 0 && estado_GP == 1 && estado_MCA == 0) {
+    estado_GP = 1; 
+    estado_R = 2; 
+    estado_MCA = 0;
+    tControle_CR.Saida(0); // Aciona a saída do controle CR
+  } else if (estado_R == 1 && estado_GP == 0 && estado_MCA == 0) {
+    estado_GP = 0; 
+    estado_R = 1; 
+    estado_MCA = 0;
+    tControle_CR.Saida(0); // Aciona a saída do controle CR
+  } else if (estado_R == 1 && estado_GP == 0 && estado_MCA == 1) {
+    estado_GP = 0; 
+    estado_R = 1; 
+    estado_MCA = 1;
+    tControle_CR.Saida(0); // Aciona a saída do controle CR
+  } else if (estado_R == 0 && estado_GP == 1 && estado_MCA == 2) {
+    estado_GP = 1; 
+    estado_R = 2; 
+    estado_MCA = 2;
+    tControle_CR.Saida(0); // Aciona a saída do controle CR
+  } else if (estado_R == 0 && estado_GP == 2 && estado_MCA == 1) {
+    estado_GP = 2; 
+    estado_R = 1; 
+    estado_MCA = 1;
+    tControle_CR.Saida(0); // Aciona a saída do controle CR
+  } else if (estado_R == 1 && estado_GP == 2 && estado_MCA == 0) {
+    estado_GP = 2; 
+    estado_R = 1; 
+    estado_MCA = 0;
+    tControle_CR.Saida(0); // Aciona a saída do controle CR
+  } else if (estado_R == 2 && estado_GP == 1 && estado_MCA == 0) {
+    estado_GP = 1; 
+    estado_R = 2; 
+    estado_MCA = 0;
+    tControle_CR.Saida(0); // Aciona a saída do controle CR
+  } else if (estado_R == 2 && estado_GP == 1 && estado_MCA == 2) {
+    estado_GP = 1; 
+    estado_R = 2; 
+    estado_MCA = 2;
+    tControle_CR.Saida(0); // Aciona a saída do controle CR
+  }
+}
+
+void controlaTravamentoMCA() {
+  // Função para controlar o travamento da MCA
+  if (estado_R == 0 && estado_GP == 0 && estado_MCA == 0) {
+    estado_GP = 0; 
+    estado_R = 0; 
+    estado_MCA = 1; // Atualiza estado para travado
+    tControle_MCA.Saida(0); // Aciona a saída do controle MCA
+  } else if (estado_R == 0 && estado_GP == 0 && estado_MCA == 1) {
+    estado_GP = 0; 
+    estado_R = 0; 
+    estado_MCA = 1; // Mantém o estado travado
+    tControle_MCA.Saida(0); // Aciona a saída do controle MCA
+  } else if (estado_R == 0 && estado_GP == 1 && estado_MCA == 0) {
+    estado_GP = 1; 
+    estado_R = 0; 
+    estado_MCA = 2; // Atualiza estado para destravado
+  } else if (estado_R == 1 && estado_GP == 0 && estado_MCA == 0) {
+    estado_GP = 0; 
+    estado_R = 1; 
+    estado_MCA = 1; // Atualiza estado para travado
+    tControle_MCA.Saida(0); // Aciona a saída do controle MCA
+  } else if (estado_R == 1 && estado_GP == 0 && estado_MCA == 1) {
+    estado_GP = 0; 
+    estado_R = 1; 
+    estado_MCA = 1; // Mantém o estado travado
+    tControle_MCA.Saida(0); // Aciona a saída do controle MCA
+  } else if (estado_R == 0 && estado_GP == 1 && estado_MCA == 2) {
+    estado_GP = 1; 
+    estado_R = 0; 
+    estado_MCA = 2; // Atualiza estado para destravado
+  } else if (estado_R == 0 && estado_GP == 2 && estado_MCA == 1) {
+    estado_GP = 2; 
+    estado_R = 0; 
+    estado_MCA = 1; // Atualiza estado para travado
+    tControle_MCA.Saida(0); // Aciona a saída do controle MCA
+  } else if (estado_R == 1 && estado_GP == 2 && estado_MCA == 0) {
+    estado_GP = 2; 
+    estado_R = 1; 
+    estado_MCA = 1; // Atualiza estado para travado
+    tControle_MCA.Saida(0); // Aciona a saída do controle MCA
+  } else if (estado_R == 2 && estado_GP == 1 && estado_MCA == 0) {
+    estado_GP = 1; 
+    estado_R = 2; 
+    estado_MCA = 2; // Atualiza estado para destravado
+  } else if (estado_R == 1 && estado_GP == 2 && estado_MCA == 1) {
+    estado_GP = 2; 
+    estado_R = 1; 
+    estado_MCA = 1; // Mantém o estado travado
+    tControle_MCA.Saida(0); // Aciona a saída do controle MCA
+  } else if (estado_R == 2 && estado_GP == 1 && estado_MCA == 2) {
+    estado_GP = 1; 
+    estado_R = 2; 
+    estado_MCA = 2; // Atualiza estado para destravado
+  }
+}
+
+void controlaDestravamentoMCA() {
+  // Função para controlar o destravamento da MCA
+  if (estado_R == 0 && estado_GP == 0 && estado_MCA == 0) {
+    estado_GP = 0; 
+    estado_R = 0; 
+    estado_MCA = 0; // Atualiza estado para destravado
+  } else if (estado_R == 0 && estado_GP == 0 && estado_MCA == 1) {
+    if (contador == 0) {
+      estado_GP = 0; 
+      estado_R = 0; 
+      estado_MCA = 0; // Atualiza estado para destravado
+    }
+  } else if (estado_R == 0 && estado_GP == 1 && estado_MCA == 0) {
+    estado_GP = 1; 
+    estado_R = 0; 
+    estado_MCA = 0; // Atualiza estado para destravado
+  } else if (estado_R == 1 && estado_GP == 0 && estado_MCA == 0) {
+    estado_GP = 0; 
+    estado_R = 1; 
+    estado_MCA = 0; // Atualiza estado para destravado
+  } else if (estado_R == 1 && estado_GP == 0 && estado_MCA == 1) {
+    if (contador == 0) {
+      estado_GP = 0; 
+      estado_R = 1; 
+      estado_MCA = 0; // Atualiza estado para destravado
+    }
+  } else if (estado_R == 0 && estado_GP == 1 && estado_MCA == 2) {
+    estado_GP = 1; 
+    estado_R = 0; 
+    estado_MCA = 2; // Atualiza estado para destravado
+  } else if (estado_R == 0 && estado_GP == 2 && estado_MCA == 1) {
+    if (contador == 0) {
+      estado_GP = 1; 
+      estado_R = 0; 
+      estado_MCA = 0; // Atualiza estado para destravado
+    }
+  } else if (estado_R == 1 && estado_GP == 2 && estado_MCA == 0) {
+    estado_GP = 2; 
+    estado_R = 1; 
+    estado_MCA = 0; // Atualiza estado para destravado
+  } else if (estado_R == 2 && estado_GP == 1 && estado_MCA == 0) {
+    estado_GP = 1; 
+    estado_R = 2; 
+    estado_MCA = 0; // Atualiza estado para destravado
+  } else if (estado_R == 1 && estado_GP == 2 && estado_MCA == 1) {
+    if (contador == 0) {
+      estado_GP = 2; 
+      estado_R = 1; 
+      estado_MCA = 0; // Atualiza estado para destravado
+    }
+  } else if (estado_R == 2 && estado_GP == 1 && estado_MCA == 2) {
+    estado_GP = 1; 
+    estado_R = 2; 
+    estado_MCA = 0; // Atualiza estado para destravado
+  }
+}
+void atualizaCancelas() {
+  // Atualiza o estado das cancelas com base nos estados atuais
+  if (estado_GP == 0 && estado_R == 0 && estado_MCA == 0) {
+    digitalWrite(CANCELA_GALPAO, HIGH); // Aciona a cancela do galpão para subir
+    digitalWrite(CANCELA_RUA, LOW); // Mantém a cancela da rua abaixada
+    digitalWrite(TRAVAMENTO_MCA, LOW); // Mantém o travamento da MCA abaixado
+  } else if (estado_GP == 0 && estado_R == 0 && estado_MCA == 1) {
+    digitalWrite(CANCELA_GALPAO, LOW); // Cancela do galpão fica abaixada
+    digitalWrite(CANCELA_RUA, LOW); // Cancela da rua fica abaixada
+    digitalWrite(TRAVAMENTO_MCA, LOW); // Mantém o travamento da MCA abaixado
+    if (tControle_MCA.Saida(1)) { // Verifica o tempo de controle da MCA
+      if (contador >= 0) { // Verifica se o contador é maior ou igual a zero
+        estado_MCA = 0; // Atualiza estado da MCA para destravada
+        contador = 0; // Reseta o contador
+      }
+    }
+  } else if (estado_GP == 0 && estado_R == 1 && estado_MCA == 0) {
+    digitalWrite(CANCELA_GALPAO, LOW); // Cancela do galpão fica abaixada
+    Serial.println("Cancela do Galpão acionada para abaixar."); // Log de status
+    delay(1000); // Aguarda um segundo
+    if (digitalRead(CANCELA_GALPAO_BAIXO) == LOW && digitalRead(CANCELA_RUA_BAIXO) == LOW) { // Verifica se as cancelas estão abaixadas
+      Serial.println("Cancela do Galpão abaixou, levantar a cancela da rua."); // Log de status
+      digitalWrite(CANCELA_RUA, HIGH); // Aciona a cancela da rua para subir
+      digitalWrite(TRAVAMENTO_MCA, LOW); // Mantém o travamento da MCA abaixado
+    }
+    if (tControle_CR.Saida(1)) { // Verifica o tempo de controle da rua
+      Serial.println("Tempo finalizado, acionada cancela da rua para abaixar."); // Log de status
+      digitalWrite(CANCELA_RUA, LOW); // Aciona a cancela da rua para abaixar
+      if (digitalRead(CANCELA_RUA_BAIXO) == LOW) { // Verifica se a cancela da rua abaixou
+        Serial.println("Cancela da rua abaixou, voltar para stand by."); // Log de status
+        estado_R = 0; // Atualiza estado da rua para stand by
+        estado_GP = 0; // Atualiza estado do galpão para stand by
+        estado_MCA = 0; // Atualiza estado da MCA para stand by
+      }
+    }
+  } else if (estado_GP == 0 && estado_R == 1 && estado_MCA == 1) {
+    digitalWrite(CANCELA_GALPAO, LOW); // Cancela do galpão fica abaixada
+    Serial.println("Cancela do Galpão acionada para abaixar."); // Log de status
+    delay(1000); // Aguarda um segundo
+    if (digitalRead(CANCELA_GALPAO_BAIXO) == LOW && digitalRead(CANCELA_RUA_BAIXO) == LOW) { // Verifica se as cancelas estão abaixadas
+      Serial.println("Cancela do Galpão abaixou, levantar a cancela da rua."); // Log de status
+      digitalWrite(CANCELA_RUA, HIGH); // Aciona a cancela da rua para subir
+      digitalWrite(TRAVAMENTO_MCA, LOW); // Mantém o travamento da MCA abaixado
+    }
+    if (tControle_CR.Saida(1)) { // Verifica o tempo de controle da rua
+      Serial.println("Tempo finalizado, acionada cancela da rua para abaixar."); // Log de status
+      digitalWrite(CANCELA_RUA, LOW); // Aciona a cancela da rua para abaixar
+      if (digitalRead(CANCELA_RUA_BAIXO) == LOW) { // Verifica se a cancela da rua abaixou
+        Serial.println("Cancela da rua abaixou, voltar para stand by."); // Log de status
+        estado_R = 0; // Atualiza estado da rua para stand by
+      }
+    }
+    if (tControle_MCA.Saida(1)) { // Verifica o tempo de controle da MCA
+      if (contador >= 0) { // Verifica se o contador é maior ou igual a zero
+        estado_MCA = 0; // Atualiza estado da MCA para destravada
+        contador = 0; // Reseta o contador
+      }
+    }
+  } else if (estado_GP == 1 && estado_R == 0 && estado_MCA == 0) {
+    digitalWrite(CANCELA_GALPAO, HIGH); // Aciona a cancela do galpão para subir
+    Serial.println("Cancela do Galpão acionada para subir."); // Log de status
+    delay(1000); // Aguarda um segundo
+    if (digitalRead(CANCELA_GALPAO_CIMA) == LOW) { // Verifica se a cancela do galpão subiu
+      Serial.println("Cancela do Galpão subiu."); // Log de status
+      digitalWrite(CANCELA_RUA, LOW); // Mantém a cancela da rua abaixada
+      digitalWrite(TRAVAMENTO_MCA, HIGH); // Aciona o travamento da MCA
+    }
+    if (tControle_CG.Saida(1)) { // Verifica o tempo de controle do galpão
+      Serial.println("Tempo finalizado, voltar para stand by."); // Log de status
+      estado_GP = 0; // Atualiza estado do galpão para stand by
+    }
+  } else if (estado_GP == 1 && estado_R == 0 && estado_MCA == 2) {
+    digitalWrite(CANCELA_GALPAO, HIGH); // Aciona a cancela do galpão para subir
+    Serial.println("Cancela do Galpão acionada para subir."); // Log de status
+    if (digitalRead(CANCELA_GALPAO_CIMA) == LOW) { // Verifica se a cancela do galpão subiu
+      Serial.println("Cancela do Galpão subiu."); // Log de status
+      digitalWrite(CANCELA_RUA, LOW); // Mantém a cancela da rua abaixada
+      digitalWrite(TRAVAMENTO_MCA, HIGH); // Aciona o travamento da MCA
+    }
+    if (tControle_CG.Saida(1)) { // Verifica o tempo de controle do galpão
+      Serial.println("Tempo finalizado, mandar cancela galpão descer."); // Log de status
+      digitalWrite(CANCELA_GALPAO, LOW); // Aciona a cancela do galpão para abaixar
+      if (digitalRead(CANCELA_GALPAO_BAIXO) == LOW) { // Verifica se a cancela do galpão abaixou
+        Serial.println("Cancela do Galpão desceu."); // Log de status
+        estado_GP = 0; // Atualiza estado do galpão para stand by
+        estado_MCA = 1; // Atualiza estado da MCA para travada
+        digitalWrite(TRAVAMENTO_MCA, LOW); // Mantém o travamento da MCA abaixado
+      }
+    }
+  } else if (estado_GP == 1 && estado_R == 2 && estado_MCA == 0) {
+    digitalWrite(CANCELA_GALPAO, HIGH); // Aciona a cancela do galpão para subir
+    Serial.println("Cancela do Galpão acionada para subir."); // Log de status
+    if (digitalRead(CANCELA_GALPAO_CIMA) == LOW) { // Verifica se a cancela do galpão subiu
+      Serial.println("Cancela do Galpão subiu."); // Log de status
+      digitalWrite(CANCELA_RUA, LOW); // Mantém a cancela da rua abaixada
+      digitalWrite(TRAVAMENTO_MCA, HIGH); // Aciona o travamento da MCA
+    }
+    if (tControle_CG.Saida(1)) { // Verifica o tempo de controle do galpão
+      Serial.println("Tempo finalizado, mandar cancela galpão descer."); // Log de status
+      digitalWrite(CANCELA_GALPAO, LOW); // Aciona a cancela do galpão para abaixar
+      if (digitalRead(CANCELA_GALPAO_BAIXO) == LOW) { // Verifica se a cancela do galpão abaixou
+        Serial.println("Cancela do Galpão desceu."); // Log de status
+        digitalWrite(TRAVAMENTO_MCA, LOW); // Mantém o travamento da MCA abaixado
+        estado_GP = 0; // Atualiza estado do galpão para stand by
+        estado_MCA = 0; // Atualiza estado da MCA para destravada
+        estado_R = 1; // Atualiza estado da rua para destravada
+      }
+    }
+  } else if (estado_GP == 1 && estado_R == 2 && estado_MCA == 2) {
+    digitalWrite(CANCELA_GALPAO, HIGH); // Aciona a cancela do galpão para subir
+    Serial.println("Cancela do Galpão acionada para subir."); // Log de status
+    if (digitalRead(CANCELA_GALPAO_CIMA) == LOW) { // Verifica se a cancela do galpão subiu
+      Serial.println("Cancela do Galpão subiu."); // Log de status
+      digitalWrite(CANCELA_RUA, LOW); // Mantém a cancela da rua abaixada
+      digitalWrite(TRAVAMENTO_MCA, HIGH); // Aciona o travamento da MCA
+    }
+    if (tControle_CG.Saida(1)) { // Verifica o tempo de controle do galpão
+      Serial.println("Tempo finalizado, mandar cancela galpão descer."); // Log de status
+      digitalWrite(CANCELA_GALPAO, LOW); // Aciona a cancela do galpão para abaixar
+      if (digitalRead(CANCELA_GALPAO_BAIXO) == LOW) { // Verifica se a cancela do galpão abaixou
+        Serial.println("Cancela do Galpão desceu."); // Log de status
+        digitalWrite(TRAVAMENTO_MCA, LOW); // Mantém o travamento da MCA abaixado
+        estado_GP = 0; // Atualiza estado do galpão para stand by
+        estado_MCA = 1; // Atualiza estado da MCA para travada
+        estado_R = 1; // Atualiza estado da rua para destravada
+        tControle_MCA.Saida(0); // Reseta o controle da MCA
+      }
+    }
+  } else if (estado_GP == 2 && estado_R == 1 && estado_MCA == 0) {
+    digitalWrite(CANCELA_GALPAO, LOW); // Aciona a cancela do galpão para abaixar
+    Serial.println("Cancela do Galpão acionada para descer."); // Log de status
+    if (digitalRead(CANCELA_GALPAO_BAIXO) == LOW && digitalRead(CANCELA_RUA_BAIXO) == LOW) { // Verifica se as cancelas estão abaixadas
+      Serial.println("Cancela do Galpão desceu, levantar a cancela da rua."); // Log de status
+      digitalWrite(CANCELA_RUA, HIGH); // Aciona a cancela da rua para subir
+      digitalWrite(TRAVAMENTO_MCA, LOW); // Mantém o travamento da MCA abaixado
+    }
+    if (tControle_CR.Saida(1)) { // Verifica o tempo de controle da rua
+      digitalWrite(CANCELA_RUA, LOW); // Aciona a cancela da rua para abaixar
+      if (digitalRead(CANCELA_RUA_BAIXO) == LOW) { // Verifica se a cancela da rua abaixou
+        digitalWrite(TRAVAMENTO_MCA, HIGH); // Aciona o travamento da MCA
+        estado_GP = 1; // Atualiza estado do galpão para destravada
+        estado_MCA = 0; // Atualiza estado da MCA para destravada
+        estado_R = 0; // Atualiza estado da rua para stand by
+      }
+    }
+  } else if (estado_GP == 2 && estado_R == 1 && estado_MCA == 1) {
+    digitalWrite(CANCELA_GALPAO, LOW); // Aciona a cancela do galpão para abaixar
+    if (digitalRead(CANCELA_GALPAO_BAIXO) == LOW && digitalRead(CANCELA_RUA_BAIXO) == LOW) { // Verifica se as cancelas estão abaixadas
+      digitalWrite(CANCELA_RUA, HIGH); // Aciona a cancela da rua para subir
+      digitalWrite(TRAVAMENTO_MCA, LOW); // Mantém o travamento da MCA abaixado
+    }
+    if (tControle_CR.Saida(1)) { // Verifica o tempo de controle da rua
+      digitalWrite(CANCELA_RUA, LOW); // Aciona a cancela da rua para abaixar
+      if (digitalRead(CANCELA_RUA_BAIXO) == LOW) { // Verifica se a cancela da rua abaixou
+        estado_R = 0; // Atualiza estado da rua para stand by
+      }
+    }
+    if (tControle_MCA.Saida(1)) { // Verifica o tempo de controle da MCA
+      if (contador >= 0) { // Verifica se o contador é maior ou igual a zero
+        estado_MCA = 0; // Atualiza estado da MCA para destravada
+        contador = 0; // Reseta o contador
+      }
+    }
+  } else if (estado_GP == 2 && estado_R == 0 && estado_MCA == 1) {
+    digitalWrite(CANCELA_GALPAO, LOW); // Aciona a cancela do galpão para abaixar
+    digitalWrite(CANCELA_RUA, LOW); // Mantém a cancela da rua abaixada
+    digitalWrite(TRAVAMENTO_MCA, LOW); // Mantém o travamento da MCA abaixado
+    if (tControle_MCA.Saida(1)) { // Verifica o tempo de controle da MCA
+      if (contador >= 0) { // Verifica se o contador é maior ou igual a zero
+        estado_MCA = 0; // Atualiza estado da MCA para destravada
+        estado_GP = 1; // Atualiza estado do galpão para destravada
+        contador = 0; // Reseta o contador
+      }
+    }
+  }
+}
+Código.txt
+Exibindo Código.txt…
